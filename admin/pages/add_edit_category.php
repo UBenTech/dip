@@ -4,20 +4,67 @@ defined('BASE_URL') or define('BASE_URL', '/');
 $admin_base_url = BASE_URL . 'admin/';
 global $conn;
 
+// --- Helper functions (copied from manage_categories.php for now) ---
+function build_category_tree(array &$elements, $parentId = null) {
+    $branch = [];
+    foreach ($elements as $element) {
+        if ($element['parent_id'] == $parentId) {
+            $children = build_category_tree($elements, $element['id']);
+            if ($children) {
+                $element['children'] = $children;
+            }
+            $branch[] = $element;
+        }
+    }
+    return $branch;
+}
+
+function generate_category_options(array $categories, $selectedParentId = null, $excludeCategoryId = null, $level = 0) {
+    $options = '';
+    foreach ($categories as $category) {
+        if ($excludeCategoryId !== null && $category['id'] == $excludeCategoryId) {
+            continue;
+        }
+        $value = $category['id'];
+        // Use loose comparison for selectedParentId as it might come from POST data as string '0'
+        $selected = ($selectedParentId !== null && $selectedParentId == $value) ? 'selected' : '';
+        $indent = str_repeat('&nbsp;&nbsp;&nbsp;&nbsp;', $level);
+        $options .= "<option value=\"{$value}\" {$selected}>" . $indent . esc_html($category['name']) . "</option>";
+        if (!empty($category['children'])) {
+            $options .= generate_category_options($category['children'], $selectedParentId, $excludeCategoryId, $level + 1);
+        }
+    }
+    return $options;
+}
+// --- End Helper functions ---
+
 $is_editing = false;
 $category_id = null;
 $category_name = '';
 $category_slug = '';
 $category_description = '';
+$category_parent_id = null; // Added for parent_id
 
-$form_action_target = 'add_category_process.php';
+// Fetch all categories for the dropdown
+$all_categories_sql = "SELECT id, name, parent_id FROM categories ORDER BY name ASC";
+$all_categories_result = $conn->query($all_categories_sql);
+$all_categories_flat = ($all_categories_result && $all_categories_result->num_rows > 0) ? $all_categories_result->fetch_all(MYSQLI_ASSOC) : [];
+$category_tree_for_select = build_category_tree($all_categories_flat);
+
+
+$form_action_target = 'add_category_process.php'; // Default for adding
+$field_name_prefix = 'category_'; // For add_category_process.php
 
 if (isset($_GET['id']) && !empty($_GET['id'])) {
     $is_editing = true;
     $category_id = (int)$_GET['id'];
+    // For edit_category_process.php, it expects 'name', 'slug', 'description', 'parent_id'
+    // The GET parameter for ID is 'id' as per the form action construction.
     $form_action_target = 'edit_category_process.php?id=' . $category_id;
+    $field_name_prefix = ''; // For edit_category_process.php
 
-    $stmt = $conn->prepare("SELECT name, slug, description FROM categories WHERE id = ?");
+    // Fetch current category details including parent_id
+    $stmt = $conn->prepare("SELECT name, slug, description, parent_id FROM categories WHERE id = ?");
     if ($stmt) {
         $stmt->bind_param("i", $category_id);
         $stmt->execute();
@@ -27,6 +74,7 @@ if (isset($_GET['id']) && !empty($_GET['id'])) {
             $category_name = $category['name'];
             $category_slug = $category['slug'];
             $category_description = $category['description'];
+            $category_parent_id = $category['parent_id'];
         } else {
             $_SESSION['flash_message'] = "Category not found.";
             $_SESSION['flash_message_type'] = "error";
@@ -47,6 +95,11 @@ $form_action = $admin_base_url . 'actions/' . $form_action_target;
 // Retrieve form data from session if validation failed
 $form_data = $_SESSION['form_data'] ?? [];
 unset($_SESSION['form_data']);
+
+// Determine current parent ID for form (from form_data if exists, else from DB or null)
+$current_parent_id_for_form = $form_data[$field_name_prefix . 'parent_id'] ?? ($form_data['parent_id'] ?? $category_parent_id);
+$exclude_id_for_form = $is_editing ? $category_id : null;
+
 ?>
 
 <div class="container mx-auto px-4 py-8">
@@ -73,28 +126,39 @@ unset($_SESSION['form_data']);
         </div>
     <?php endif; ?>
 
-    <form action="<?php echo $form_action; ?>" method="POST" class="bg-white p-6 md:p-8 rounded-lg shadow-lg space-y-6">
+    <form action="<?php echo esc_html($form_action); ?>" method="POST" class="bg-white p-6 md:p-8 rounded-lg shadow-lg space-y-6">
         <?php echo generate_csrf_input(); ?>
         
         <div>
-            <label for="category_name" class="block text-sm font-medium text-gray-700 mb-1">Category Name <span class="text-red-500">*</span></label>
-            <input type="text" name="category_name" id="category_name" value="<?php echo esc_html($form_data['category_name'] ?? $category_name); ?>" required 
+            <label for="<?php echo $field_name_prefix; ?>name" class="block text-sm font-medium text-gray-700 mb-1">Category Name <span class="text-red-500">*</span></label>
+            <input type="text" name="<?php echo $field_name_prefix; ?>name" id="<?php echo $field_name_prefix; ?>name"
+                   value="<?php echo esc_html($form_data[$field_name_prefix . 'name'] ?? ($form_data['name'] ?? $category_name)); ?>" required
                    class="mt-1 block w-full px-3 py-2.5 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-admin-primary focus:border-admin-primary sm:text-sm"
-                   oninput="document.getElementById('category_slug').value = slugify(this.value);">
+                   oninput="document.getElementById('<?php echo $field_name_prefix; ?>slug').value = slugify(this.value);">
         </div>
 
         <div>
-            <label for="category_slug" class="block text-sm font-medium text-gray-700 mb-1">Slug (URL-friendly)</label>
-            <input type="text" name="category_slug" id="category_slug" value="<?php echo esc_html($form_data['category_slug'] ?? $category_slug); ?>" 
+            <label for="<?php echo $field_name_prefix; ?>slug" class="block text-sm font-medium text-gray-700 mb-1">Slug (URL-friendly)</label>
+            <input type="text" name="<?php echo $field_name_prefix; ?>slug" id="<?php echo $field_name_prefix; ?>slug"
+                   value="<?php echo esc_html($form_data[$field_name_prefix . 'slug'] ?? ($form_data['slug'] ?? $category_slug)); ?>"
                    class="mt-1 block w-full px-3 py-2.5 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-admin-primary focus:border-admin-primary sm:text-sm bg-gray-50"
                    placeholder="auto-generated-from-name">
             <p class="text-xs text-gray-500 mt-1">If left blank, this will be auto-generated. Must be unique.</p>
         </div>
 
         <div>
-            <label for="category_description" class="block text-sm font-medium text-gray-700 mb-1">Description</label>
-            <textarea name="category_description" id="category_description" rows="4"
-                      class="mt-1 block w-full px-3 py-2.5 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-admin-primary focus:border-admin-primary sm:text-sm"><?php echo esc_html($form_data['category_description'] ?? $category_description); ?></textarea>
+            <label for="parent_id" class="block text-sm font-medium text-gray-700 mb-1">Parent Category</label>
+            <select name="parent_id" id="parent_id" class="mt-1 block w-full py-2 px-3 border border-gray-300 bg-white rounded-md shadow-sm focus:outline-none focus:ring-admin-primary focus:border-admin-primary sm:text-sm">
+                <option value="0">-- None (Top Level) --</option>
+                <?php echo generate_category_options($category_tree_for_select, $current_parent_id_for_form, $exclude_id_for_form); ?>
+            </select>
+            <p class="text-xs text-gray-500 mt-1">Select a parent category to create a hierarchy.</p>
+        </div>
+
+        <div>
+            <label for="<?php echo $field_name_prefix; ?>description" class="block text-sm font-medium text-gray-700 mb-1">Description</label>
+            <textarea name="<?php echo $field_name_prefix; ?>description" id="<?php echo $field_name_prefix; ?>description" rows="4"
+                      class="mt-1 block w-full px-3 py-2.5 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-admin-primary focus:border-admin-primary sm:text-sm"><?php echo esc_html($form_data[$field_name_prefix . 'description'] ?? ($form_data['description'] ?? $category_description)); ?></textarea>
             <p class="text-xs text-gray-500 mt-1">Optional. A brief description of the category.</p>
         </div>
         
@@ -122,5 +186,23 @@ function slugify(text) {
         .replace(/^-+/, '')
         .replace(/-+$/, '');
 }
+
+// Auto-update slug from name field (specific to the prefix used)
+const nameField = document.getElementById('<?php echo $field_name_prefix; ?>name');
+const slugField = document.getElementById('<?php echo $field_name_prefix; ?>slug');
+
+if (nameField && slugField) {
+    nameField.addEventListener('input', function() {
+        if (!slugField.value.trim() || slugField.dataset.autoGenerated === 'true') {
+            slugField.value = slugify(this.value);
+            slugField.dataset.autoGenerated = 'true';
+        }
+    });
+    slugField.addEventListener('input', function() {
+        this.dataset.autoGenerated = 'false';
+    });
+}
+
+
 if (typeof lucide !== 'undefined') { lucide.createIcons(); }
 </script>
