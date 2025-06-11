@@ -25,6 +25,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_category'])) {
     $name = trim($_POST['category_name']);
     $slug = trim($_POST['category_slug']);
     $description = trim($_POST['category_description']);
+    // Handle parent_id: if empty or '0', treat as NULL
+    $parent_id_input = $_POST['parent_id'] ?? null;
+    $parent_id = (!empty($parent_id_input) && $parent_id_input !== '0') ? (int)$parent_id_input : null;
     $errors = [];
 
     if (empty($name)) { $errors[] = "Category name is required."; }
@@ -38,6 +41,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_category'])) {
     if ($stmt_check->num_rows > 0) { $errors[] = "Category slug already exists. Choose a different name or slug."; }
     $stmt_check->close();
 
+    // Check if parent_id exists if provided
+    if ($parent_id !== null) {
+        $stmt_check_parent = $conn->prepare("SELECT id FROM categories WHERE id = ?");
+        if ($stmt_check_parent) {
+            $stmt_check_parent->bind_param("i", $parent_id);
+            $stmt_check_parent->execute();
+            $stmt_check_parent->store_result();
+            if ($stmt_check_parent->num_rows == 0) {
+                $errors[] = "Selected parent category does not exist.";
+            }
+            $stmt_check_parent->close();
+        } else {
+            $errors[] = "Database error preparing parent category check.";
+            error_log("DB Prepare Error for parent check: " . $conn->error);
+        }
+    }
+
     if (!empty($errors)) {
         $_SESSION['form_error'] = $errors;
         $_SESSION['form_data'] = $_POST;
@@ -45,9 +65,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_category'])) {
         exit;
     }
 
-    $stmt_insert = $conn->prepare("INSERT INTO categories (name, slug, description) VALUES (?, ?, ?)");
+    $stmt_insert = $conn->prepare("INSERT INTO categories (name, slug, description, parent_id) VALUES (?, ?, ?, ?)");
     if ($stmt_insert) {
-        $stmt_insert->bind_param("sss", $name, $slug, $description);
+        $stmt_insert->bind_param("sssi", $name, $slug, $description, $parent_id);
         if ($stmt_insert->execute()) {
             $_SESSION['flash_message'] = "Category created successfully!";
             $_SESSION['flash_message_type'] = "success";
